@@ -1,0 +1,67 @@
+### Montagem e envio de ordem de Box Spread em ambiente simulado MT5
+
+import pandas as pd
+import requests
+import matplotlib.pyplot as plt
+import numpy as np
+
+# Definição do ativo e vencimento da opção
+ativo = 'bova11'
+vencimento = '2024-07-19'
+
+# Função para importar a lista de opções para um vencimento específico
+def optionindate(ativo, vencimento):
+    url = f'https://opcoes.net.br/listaopcoes/completa?idAcao={ativo}&listarVencimentos=false&cotacoes=true&vencimentos={vencimento}'
+    r = requests.get(url).json()
+    x = ([ativo, vencimento, i[0].split('_')[0], i[2], i[3], i[5], i[8], i[9], i[10]] for i in r['data']['cotacoesOpcoes'])
+    df = pd.DataFrame(x, columns=['subjacente', 'vencimento', 'ativo', 'tipo', 'modelo', 'strike', 'preco', 'negocios', 'volume'])
+    df_filtered = df[df['modelo'] == 'E']
+    return df_filtered
+
+# Importar opções
+df_opcoes = optionindate(ativo, vencimento)
+
+# Filtrar por tipo de opção (CALL e PUT)
+df_calls = df_opcoes[df_opcoes['tipo'] == 'CALL']
+df_puts = df_opcoes[df_opcoes['tipo'] == 'PUT']
+
+# Ordenar as opções por preço
+df_calls = df_calls.sort_values(by='preco', ascending=True)
+df_puts = df_puts.sort_values(by='preco', ascending=True)
+
+# Selecionar long e short calls otimizados para alta
+bull_call_spread = df_calls.nlargest(2, 'preco')  # Selecionar as duas opções mais caras
+long_call_strike = bull_call_spread.iloc[0]['strike']
+short_call_strike = bull_call_spread.iloc[1]['strike']
+
+# Selecionar long e short puts otimizados para baixa
+bear_put_spread = df_puts.nsmallest(2, 'preco')  # Selecionar as duas opções mais baratas
+long_put_strike = bear_put_spread.iloc[0]['strike']
+short_put_strike = bear_put_spread.iloc[1]['strike']
+
+# Preços para o eixo x (variação no preço do ativo subjacente)
+underlying_prices = np.arange(0, 200, 1)
+
+# Lucro/Prejuízo do Call Spread
+call_spread_profit = (np.maximum(0, underlying_prices - long_call_strike) - bull_call_spread.iloc[0]['preco']) - \
+                     (np.maximum(0, underlying_prices - short_call_strike) + bull_call_spread.iloc[1]['preco'])
+
+# Lucro/Prejuízo do Put Spread
+put_spread_profit = (np.maximum(0, long_put_strike - underlying_prices) - bear_put_spread.iloc[0]['preco']) - \
+                    (np.maximum(0, short_put_strike - underlying_prices) + bear_put_spread.iloc[1]['preco'])
+
+# Lucro/Prejuízo da combinação dos spreads (Box Spread)
+box_spread_profit = call_spread_profit + put_spread_profit
+
+# Plotar o lucro/prejuízo dos spreads individuais e do Box Spread
+plt.figure(figsize=(10, 5))
+plt.plot(underlying_prices, call_spread_profit, label='Bull Spread (Calls)', color='blue')
+plt.plot(underlying_prices, put_spread_profit, label='Bear Spread (Puts)', color='red')
+plt.plot(underlying_prices, box_spread_profit, label='Box Spread', linestyle='--', color='green')
+plt.axhline(0, color='black', linestyle='--')
+plt.xlabel('Preço do Ativo Subjacente')
+plt.ylabel('Lucro/Prejuízo')
+plt.title('Lucro/Prejuízo dos Spreads')
+plt.legend()
+plt.grid(True)
+plt.show()
