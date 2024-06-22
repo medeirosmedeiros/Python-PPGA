@@ -1,67 +1,149 @@
 ### Montagem e envio de ordem de Box Spread em ambiente simulado MT5
 
-import pandas as pd
 import requests
+import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
+import MetaTrader5 as mt5
+from datetime import datetime
 
-# Definição do ativo e vencimento da opção
-ativo = 'bova11'
-vencimento = '2024-07-19'
-
-# Função para importar a lista de opções para um vencimento específico
-def optionindate(ativo, vencimento):
-    url = f'https://opcoes.net.br/listaopcoes/completa?idAcao={ativo}&listarVencimentos=false&cotacoes=true&vencimentos={vencimento}'
+# Função para obter os dados das opções e filtrar
+def optionchaindate(subjacente, vencimento):
+    url = f'https://opcoes.net.br/listaopcoes/completa?idAcao={subjacente}&listarVencimentos=false&cotacoes=true&vencimentos={vencimento}'
     r = requests.get(url).json()
-    x = ([ativo, vencimento, i[0].split('_')[0], i[2], i[3], i[5], i[8], i[9], i[10]] for i in r['data']['cotacoesOpcoes'])
+    x = ([subjacente, vencimento, i[0].split('_')[0], i[2], i[3], i[5], i[8], i[9], i[10]] for i in r['data']['cotacoesOpcoes'])
     df = pd.DataFrame(x, columns=['subjacente', 'vencimento', 'ativo', 'tipo', 'modelo', 'strike', 'preco', 'negocios', 'volume'])
-    df_filtered = df[df['modelo'] == 'E']
-    return df_filtered
+    df['negocios'] = pd.to_numeric(df['negocios'], errors='coerce')
+    df = df[(df['modelo'] == 'E') & (df['negocios'] > 10)]
+    return df
 
-# Importar opções
-df_opcoes = optionindate(ativo, vencimento)
+# Obter os dados das opções
+subjacente = 'ITUB4'
+vencimento = '2024-09-20'
+df = optionchaindate(subjacente, vencimento)
 
-# Filtrar por tipo de opção (CALL e PUT)
-df_calls = df_opcoes[df_opcoes['tipo'] == 'CALL']
-df_puts = df_opcoes[df_opcoes['tipo'] == 'PUT']
+# Mostrar as primeiras linhas do dataframe filtrado
+print(df.head())
 
-# Ordenar as opções por preço
-df_calls = df_calls.sort_values(by='preco', ascending=True)
-df_puts = df_puts.sort_values(by='preco', ascending=True)
-
-# Selecionar long e short calls otimizados para alta
-bull_call_spread = df_calls.nlargest(2, 'preco')  # Selecionar as duas opções mais caras
-long_call_strike = bull_call_spread.iloc[0]['strike']
-short_call_strike = bull_call_spread.iloc[1]['strike']
-
-# Selecionar long e short puts otimizados para baixa
-bear_put_spread = df_puts.nsmallest(2, 'preco')  # Selecionar as duas opções mais baratas
-long_put_strike = bear_put_spread.iloc[0]['strike']
-short_put_strike = bear_put_spread.iloc[1]['strike']
+# Função para calcular o lucro e prejuízo do Box Spread
+def calculate_box_spread_profit(call_options, put_options, strike_prices, underlying_prices):
+    call_premiums = call_options['preco'].astype(float).tolist()
+    put_premiums = put_options['preco'].astype(float).tolist()
+    
+    # Lucro e Prejuízo para Bull Spread com Calls
+    bull_profit = np.where(underlying_prices <= strike_prices[0], 0,
+                           np.where(underlying_prices <= strike_prices[1], underlying_prices - strike_prices[0],
+                                    strike_prices[1] - strike_prices[0]))
+    bull_profit = bull_profit - call_premiums[0] + call_premiums[1]
+    
+    # Lucro e Prejuízo para Bear Spread com Puts
+    bear_profit = np.where(underlying_prices <= strike_prices[0], strike_prices[1] - strike_prices[0],
+                           np.where(underlying_prices <= strike_prices[1], strike_prices[1] - underlying_prices,
+                                    0))
+    bear_profit = bear_profit + put_premiums[0] - put_premiums[1]
+    
+    # Combinação do Bull Spread com o Bear Spread para criar o Box Spread
+    box_profit = bull_profit + bear_profit
+    return bull_profit, bear_profit, box_profit
 
 # Preços para o eixo x (variação no preço do ativo subjacente)
-underlying_prices = np.arange(0, 200, 1)
+underlying_prices = np.arange(0, 80, 0.5)
 
-# Lucro/Prejuízo do Call Spread
-call_spread_profit = (np.maximum(0, underlying_prices - long_call_strike) - bull_call_spread.iloc[0]['preco']) - \
-                     (np.maximum(0, underlying_prices - short_call_strike) + bull_call_spread.iloc[1]['preco'])
+# Encontrar a combinação de strikes que maximiza o lucro do Box Spread
+max_profit = -np.inf
+best_strikes = None
+best_call_options = None
+best_put_options = None
 
-# Lucro/Prejuízo do Put Spread
-put_spread_profit = (np.maximum(0, long_put_strike - underlying_prices) - bear_put_spread.iloc[0]['preco']) - \
-                    (np.maximum(0, short_put_strike - underlying_prices) + bear_put_spread.iloc[1]['preco'])
+for i in range(len(df)):
+    for j in range(i+1, len(df)):
+        if df.iloc[i]['tipo'] == 'CALL' and df.iloc[j]['tipo'] == 'CALL':
+            for k in range(len(df)):
+                for l in range(k+1, len(df)):
+                    if df.iloc[k]['tipo'] == 'PUT' and df.iloc[l]['tipo'] == 'PUT':
+                        strike_prices = [float(df.iloc[i]['strike']), float(df.iloc[j]['strike'])]
+                        call_options = df.iloc[[i, j]]
+                        put_options = df.iloc[[k, l]]
+                        
+                        # Verificar se os strikes são distintos e na ordem correta
+                        if strike_prices[0] < strike_prices[1]:
+                            bull_profit, bear_profit, box_profit = calculate_box_spread_profit(call_options, put_options, strike_prices, underlying_prices)
+                            total_profit = np.sum(box_profit)
+                            if total_profit > max_profit:
+                                max_profit = total_profit
+                                best_strikes = strike_prices
+                                best_call_options = call_options
+                                best_put_options = put_options
 
-# Lucro/Prejuízo da combinação dos spreads (Box Spread)
-box_spread_profit = call_spread_profit + put_spread_profit
+# Calcular os lucros e prejuízos para a melhor combinação encontrada
+bull_profit, bear_profit, box_profit = calculate_box_spread_profit(best_call_options, best_put_options, best_strikes, underlying_prices)
 
-# Plotar o lucro/prejuízo dos spreads individuais e do Box Spread
-plt.figure(figsize=(10, 5))
-plt.plot(underlying_prices, call_spread_profit, label='Bull Spread (Calls)', color='blue')
-plt.plot(underlying_prices, put_spread_profit, label='Bear Spread (Puts)', color='red')
-plt.plot(underlying_prices, box_spread_profit, label='Box Spread', linestyle='--', color='green')
-plt.axhline(0, color='black', linestyle='--')
+plt.figure(figsize=(10, 6))
+plt.plot(underlying_prices, bull_profit, label='Bull Spread com Calls', color='green')
+plt.plot(underlying_prices, bear_profit, label='Bear Spread com Puts', color='red')
+plt.plot(underlying_prices, box_profit, label='Box Spread', color='blue')
 plt.xlabel('Preço do Ativo Subjacente')
 plt.ylabel('Lucro/Prejuízo')
-plt.title('Lucro/Prejuízo dos Spreads')
+plt.title('Gráfico de Lucros e Prejuízos - Bull Spread, Bear Spread e Box Spread')
+plt.axvline(32.62, color='black', linestyle='--', linewidth=0.7, label='Spot')  # Ajuste conforme necessário
+plt.axvline(best_strikes[0], color='red', linestyle='--', linewidth=0.7, label='Strike 1')
+plt.axvline(best_strikes[1], color='blue', linestyle='--', linewidth=0.7, label='Strike 2')
 plt.legend()
 plt.grid(True)
+plt.savefig('box_spread_combined.png')
 plt.show()
+
+# Mostrar as melhores opções selecionadas
+print(f"Melhores Strikes: {best_strikes}")
+print("Melhores Call Options:")
+print(best_call_options)
+print("Melhores Put Options:")
+print(best_put_options)
+
+# Inicializar MetaTrader 5
+mt5.initialize()
+
+# Conectar à conta (insira seu login, senha e servidor)
+account = 12345678  # Número da conta
+password = "sua_senha"
+server = "seu_servidor"
+
+authorized = mt5.login(account, password, server)
+if not authorized:
+    print("Falha ao conectar-se à conta. Verifique suas credenciais e servidor.")
+    mt5.shutdown()
+    exit()
+
+# Função para enviar ordens para MetaTrader 5
+def send_order(symbol, action, volume, price, type_order=mt5.ORDER_TYPE_BUY):
+    request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": symbol,
+        "volume": volume,
+        "price": price,
+        "type": type_order,
+        "deviation": 20,
+        "magic": 234000,
+        "comment": "Order by Python",
+        "type_time": mt5.ORDER_TIME_GTC,
+        "type_filling": mt5.ORDER_FILLING_RETURN,
+    }
+    result = mt5.order_send(request)
+    return result
+
+# Volume da ordem
+volume = 1.0  # Ajuste conforme necessário
+
+# Enviar ordens de compra e venda das opções
+# Comprar CALL de menor strike
+send_order(best_call_options.iloc[0]['ativo'], "buy", volume, best_call_options.iloc[0]['preco'])
+# Vender CALL de maior strike
+send_order(best_call_options.iloc[1]['ativo'], "sell", volume, best_call_options.iloc[1]['preco'])
+# Comprar PUT de maior strike
+send_order(best_put_options.iloc[0]['ativo'], "buy", volume, best_put_options.iloc[0]['preco'])
+# Vender PUT de menor strike
+send_order(best_put_options.iloc[1]['ativo'], "sell", volume, best_put_options.iloc[1]['preco'])
+
+# Desconectar MetaTrader 5
+mt5.shutdown()
+
