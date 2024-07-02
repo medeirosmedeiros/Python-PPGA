@@ -1,11 +1,15 @@
-### Montagem e envio de ordem de Box Spread em ambiente simulado MT5
-
 import requests
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 import MetaTrader5 as mt5
-from datetime import datetime
+import time
+
+
+# Obter os dados das opções
+subjacente = 'BBDC4'  
+vencimento = '2024-09-20' 
+
 
 # Função para obter os dados das opções e filtrar
 def optionchaindate(subjacente, vencimento):
@@ -14,16 +18,13 @@ def optionchaindate(subjacente, vencimento):
     x = ([subjacente, vencimento, i[0].split('_')[0], i[2], i[3], i[5], i[8], i[9], i[10]] for i in r['data']['cotacoesOpcoes'])
     df = pd.DataFrame(x, columns=['subjacente', 'vencimento', 'ativo', 'tipo', 'modelo', 'strike', 'preco', 'negocios', 'volume'])
     df['negocios'] = pd.to_numeric(df['negocios'], errors='coerce')
-    df = df[(df['modelo'] == 'E') & (df['negocios'] > 10)]
+    df = df[(df['modelo'] == 'E') & (df['negocios'] > 1)]
     return df
 
-# Obter os dados das opções
-subjacente = 'ITUB4'
-vencimento = '2024-09-20'
 df = optionchaindate(subjacente, vencimento)
 
 # Mostrar as primeiras linhas do dataframe filtrado
-print(df.head())
+print(df)
 
 # Função para calcular o lucro e prejuízo do Box Spread
 def calculate_box_spread_profit(call_options, put_options, strike_prices, underlying_prices):
@@ -44,7 +45,7 @@ def calculate_box_spread_profit(call_options, put_options, strike_prices, underl
     
     # Combinação do Bull Spread com o Bear Spread para criar o Box Spread
     box_profit = bull_profit + bear_profit
-    return bull_profit, bear_profit, box_profit
+    return box_profit
 
 # Preços para o eixo x (variação no preço do ativo subjacente)
 underlying_prices = np.arange(0, 80, 0.5)
@@ -67,7 +68,7 @@ for i in range(len(df)):
                         
                         # Verificar se os strikes são distintos e na ordem correta
                         if strike_prices[0] < strike_prices[1]:
-                            bull_profit, bear_profit, box_profit = calculate_box_spread_profit(call_options, put_options, strike_prices, underlying_prices)
+                            box_profit = calculate_box_spread_profit(call_options, put_options, strike_prices, underlying_prices)
                             total_profit = np.sum(box_profit)
                             if total_profit > max_profit:
                                 max_profit = total_profit
@@ -75,16 +76,14 @@ for i in range(len(df)):
                                 best_call_options = call_options
                                 best_put_options = put_options
 
-# Calcular os lucros e prejuízos para a melhor combinação encontrada
-bull_profit, bear_profit, box_profit = calculate_box_spread_profit(best_call_options, best_put_options, best_strikes, underlying_prices)
+# Plotagem do gráfico de lucros e prejuízos para Bull Spread, Bear Spread e Box Spread
+box_profit = calculate_box_spread_profit(best_call_options, best_put_options, best_strikes, underlying_prices)
 
 plt.figure(figsize=(10, 6))
-plt.plot(underlying_prices, bull_profit, label='Bull Spread com Calls', color='green')
-plt.plot(underlying_prices, bear_profit, label='Bear Spread com Puts', color='red')
 plt.plot(underlying_prices, box_profit, label='Box Spread', color='blue')
 plt.xlabel('Preço do Ativo Subjacente')
 plt.ylabel('Lucro/Prejuízo')
-plt.title('Gráfico de Lucros e Prejuízos - Bull Spread, Bear Spread e Box Spread')
+plt.title('Gráfico de Lucros e Prejuízos - Box Spread')
 plt.axvline(32.62, color='black', linestyle='--', linewidth=0.7, label='Spot')  # Ajuste conforme necessário
 plt.axvline(best_strikes[0], color='red', linestyle='--', linewidth=0.7, label='Strike 1')
 plt.axvline(best_strikes[1], color='blue', linestyle='--', linewidth=0.7, label='Strike 2')
@@ -101,49 +100,50 @@ print("Melhores Put Options:")
 print(best_put_options)
 
 # Inicializar MetaTrader 5
-mt5.initialize()
-
-# Conectar à conta (insira seu login, senha e servidor)
-account = 12345678  # Número da conta
-password = "sua_senha"
-server = "seu_servidor"
-
-authorized = mt5.login(account, password, server)
-if not authorized:
-    print("Falha ao conectar-se à conta. Verifique suas credenciais e servidor.")
+if not mt5.initialize():
+    print("Falha ao inicializar o MetaTrader 5")
     mt5.shutdown()
-    exit()
+    quit()
 
-# Função para enviar ordens para MetaTrader 5
-def send_order(symbol, action, volume, price, type_order=mt5.ORDER_TYPE_BUY):
+# Função para enviar ordem de compra
+def send_buy_order(symbol, volume):
     request = {
         "action": mt5.TRADE_ACTION_DEAL,
         "symbol": symbol,
         "volume": volume,
-        "price": price,
-        "type": type_order,
-        "deviation": 20,
-        "magic": 234000,
-        "comment": "Order by Python",
-        "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_RETURN,
+        "type": mt5.ORDER_TYPE_BUY,
+        "price": mt5.symbol_info_tick(symbol).ask,
+        "sl": 0,  # Definir stop loss, se necessário
+        "tp": 0,  # Definir take profit, se necessário
+        "magic": 234000,  # Identificador único para a ordem
+        "comment": "Box Spread Buy"
     }
     result = mt5.order_send(request)
     return result
 
-# Volume da ordem
-volume = 1.0  # Ajuste conforme necessário
+# Função para enviar ordem de venda
+def send_sell_order(symbol, volume):
+    request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": symbol,
+        "volume": volume,
+        "type": mt5.ORDER_TYPE_SELL,
+        "price": mt5.symbol_info_tick(symbol).bid,
+        "sl": 0,  # Definir stop loss, se necessário
+        "tp": 0,  # Definir take profit, se necessário
+        "magic": 234001,  # Identificador único para a ordem
+        "comment": "Box Spread Sell"
+    }
+    result = mt5.order_send(request)
+    return result
 
-# Enviar ordens de compra e venda das opções
-# Comprar CALL de menor strike
-send_order(best_call_options.iloc[0]['ativo'], "buy", volume, best_call_options.iloc[0]['preco'])
-# Vender CALL de maior strike
-send_order(best_call_options.iloc[1]['ativo'], "sell", volume, best_call_options.iloc[1]['preco'])
-# Comprar PUT de maior strike
-send_order(best_put_options.iloc[0]['ativo'], "buy", volume, best_put_options.iloc[0]['preco'])
-# Vender PUT de menor strike
-send_order(best_put_options.iloc[1]['ativo'], "sell", volume, best_put_options.iloc[1]['preco'])
+# Enviar ordens para as opções selecionadas
+for index, row in best_call_options.iterrows():
+    send_buy_order(row['ativo'], 1)  # Compra de uma unidade da opção de compra
 
-# Desconectar MetaTrader 5
+for index, row in best_put_options.iterrows():
+    send_sell_order(row['ativo'], 1)  # Venda de uma unidade da opção de venda
+
+# Finalizar conexão com MetaTrader 5
 mt5.shutdown()
 
